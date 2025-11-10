@@ -1,0 +1,8 @@
+Flask==3.0.3
+yfinance==0.2.44
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.2
+xgboost==2.1.1
+ta==0.11.0
+gunicorn==23.0.0
