@@ -2,7 +2,6 @@ from flask import Flask, render_template, jsonify
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from ta import add_all_ta_features
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 import xgboost as xgb
@@ -24,7 +23,39 @@ def get_data(ticker):
     except: return None
 
 def add_indicators(df):
-    return add_all_ta_features(df, open="Open", high="High", low="Low", close="Close", volume="Volume", fillna=True)
+    df = df.copy()
+    # Manual RSI
+    delta = df['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / (avg_loss + 1e-8)
+    df['momentum_rsi'] = 100 - (100 / (1 + rs))
+    
+    # Manual MACD
+    ema12 = df['Close'].ewm(span=12).mean()
+    ema26 = df['Close'].ewm(span=26).mean()
+    df['trend_macd'] = ema12 - ema26
+    
+    # Manual SMA
+    df['trend_sma_fast'] = df['Close'].rolling(20).mean()
+    df['trend_sma_slow'] = df['Close'].rolling(50).mean()
+    
+    # Manual Bollinger Bands
+    df['bb_mid'] = df['Close'].rolling(20).mean()
+    df['bb_std'] = df['Close'].rolling(20).std()
+    df['volatility_bbh'] = df['bb_mid'] + 2 * df['bb_std']
+    df['volatility_bbl'] = df['bb_mid'] - 2 * df['bb_std']
+    
+    # Manual ATR
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift())
+    low_close = np.abs(df['Low'] - df['Close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['volatility_atr'] = tr.rolling(14).mean()
+    
+    return df
 
 def create_signals(df):
     df = df.copy()
@@ -35,7 +66,7 @@ def create_signals(df):
     macd = df['trend_macd']
     signals.append(np.tanh(macd / (macd.std() + 1e-8)))
     sma_fast = df['trend_sma_fast']
-    sma_slow = df.get('trend_sma_slow', df['Close'].rolling(50).mean())
+    sma_slow = df['trend_sma_slow']
     signals.append((sma_fast > sma_slow).astype(float))
     price = df['Close']
     upper = df['volatility_bbh']
@@ -46,8 +77,8 @@ def create_signals(df):
     return df
 
 def train_model(X, y):
-    model = xgb.XGBClassifier(n_estimators=100, max_depth=3, random_state=42, n_jobs=1)
-    tscv = TimeSeriesSplit(n_splits=3)
+    model = xgb.XGBClassifier(n_estimators=50, max_depth=3, random_state=42, n_jobs=1)
+    tscv = TimeSeriesSplit(n_splits=2)
     for train_idx, _ in tscv.split(X):
         model.fit(X[train_idx], y[train_idx])
     return model
@@ -59,6 +90,7 @@ def analyze_ticker(ticker):
         df = add_indicators(df)
         df = create_signals(df)
         df.dropna(inplace=True)
+        if len(df) < 50: return {"ticker": ticker, "error": "Not enough data"}
         features = ['Composite_Score', 'momentum_rsi', 'trend_macd', 'volatility_atr']
         X = df[features].values
         y = df['Target'].values
@@ -83,7 +115,8 @@ def analyze_ticker(ticker):
             "win_rate": round(win_rate, 3), "accuracy": round(accuracy, 3),
             "updated": datetime.now().strftime("%H:%M:%S")
         }
-    except: return {"ticker": ticker, "error": "Failed"}
+    except Exception as e:
+        return {"ticker": ticker, "error": str(e)}
 
 def update_cache():
     global CACHE
